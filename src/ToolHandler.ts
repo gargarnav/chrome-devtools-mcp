@@ -23,6 +23,7 @@ import type {
 import {isAvailableInMode, isSlimTool} from './tools/ToolDefinition.js';
 import {logger} from './utils/logger.js';
 import {fileURLToPath, pathToFileURL} from 'node:url';
+import {isDeepStrictEqual} from 'node:util';
 import {isLocalhost} from './utils/url.js';
 
 /**
@@ -176,32 +177,115 @@ async function validateToolFiles(
   }
 }
 
+function toInputJsonSchema(schema: zod.ZodType): unknown {
+  return zod.toJSONSchema(schema, {io: 'input', unrepresentable: 'any'});
+}
+
 export class ToolHandler {
-  readonly inputSchema: zod.ZodRawShape;
-  readonly registeredInputSchema: zod.ZodObject<
-    zod.ZodRawShape,
-    zod.core.$strict
-  >;
-  readonly disabled: boolean;
-  private readonly disabledReason?: string;
+  #tool: ToolDefinition | DefinedPageTool;
+  #serverArgs: ParsedArguments;
+  #inputSchema: zod.ZodRawShape = {};
+  #registeredInputSchema: zod.ZodObject<zod.ZodRawShape, zod.core.$strict> = zod
+    .object({})
+    .strict();
+  #inputJsonSchema: ReturnType<typeof toInputJsonSchema> = toInputJsonSchema(
+    this.#registeredInputSchema,
+  );
+  /**
+   * Incremented whenever an update changes the input schema the client sees.
+   */
+  #schemaVersion = 0;
+  #validatedParamsVersion = new WeakMap<Record<string, unknown>, number>();
+  #disabled = false;
+  #disabledReason?: string;
 
   constructor(
-    private readonly tool: ToolDefinition | DefinedPageTool,
-    private readonly serverArgs: ParsedArguments,
+    tool: ToolDefinition | DefinedPageTool,
+    serverArgs: ParsedArguments,
     private readonly getContext: () => Promise<McpContext>,
     private readonly toolMutex: Mutex,
     private readonly abandonPendingBrowserAttemptOnTimeout: () => void,
   ) {
+    this.#tool = tool;
+    this.#serverArgs = serverArgs;
+    this.update(tool, serverArgs);
+  }
+
+  get inputSchema(): zod.ZodRawShape {
+    return this.#inputSchema;
+  }
+
+  get registeredInputSchema(): zod.ZodObject<
+    zod.ZodRawShape,
+    zod.core.$strict
+  > {
+    return this.#registeredInputSchema;
+  }
+
+  /**
+   * Whether the tool is hidden from the client.
+   */
+  get disabled(): boolean {
+    return this.#disabled;
+  }
+
+  /**
+   * Whether calls to the tool are executed. Unlike `disabled`, this is false
+   * for tools that stay listed with --viaCli but only return an error.
+   */
+  get callable(): boolean {
+    return this.#disabledReason === undefined;
+  }
+
+  /**
+   * Replaces the tool definition and arguments. Callers must hold the tool
+   * mutex, so calls that are already waiting for it run with the new state.
+   * Returns true if the tool listing visible to the client changed.
+   */
+  update(
+    tool: ToolDefinition | DefinedPageTool,
+    serverArgs: ParsedArguments,
+  ): boolean {
+    const previousTool = this.#tool;
+    const previousDisabled = this.#disabled;
     const {disabled, reason, unavailableInMode} = getToolStatusInfo(
       tool,
       serverArgs,
     );
-    this.disabledReason = reason;
-    this.disabled =
+    this.#tool = tool;
+    this.#serverArgs = serverArgs;
+    this.#disabledReason = reason;
+    this.#disabled =
       disabled && (Boolean(unavailableInMode) || !serverArgs.viaCli);
+    const nextInputSchema = zod.object(tool.schema).strict();
+    const nextInputJsonSchema = toInputJsonSchema(nextInputSchema);
+    const schemaChanged = !isDeepStrictEqual(
+      this.#inputJsonSchema,
+      nextInputJsonSchema,
+    );
+    if (schemaChanged) {
+      this.#schemaVersion++;
+    }
+    const schemaVersion = this.#schemaVersion;
+    const registeredInputSchema = nextInputSchema.check(ctx => {
+      this.#validatedParamsVersion.set(ctx.value, schemaVersion);
+    });
+    const listingChanged =
+      schemaChanged ||
+      previousDisabled !== this.#disabled ||
+      previousTool.description !== tool.description ||
+      !isDeepStrictEqual(previousTool.annotations, tool.annotations);
+    this.#inputSchema = tool.schema;
+    this.#registeredInputSchema = registeredInputSchema;
+    this.#inputJsonSchema = nextInputJsonSchema;
+    return listingChanged;
+  }
 
-    this.inputSchema = tool.schema;
-    this.registeredInputSchema = zod.object(this.inputSchema).strict();
+  /**
+   * Releases state owned by this tool.
+   */
+  async releaseState(context: McpContext): Promise<void> {
+    await this.#tool.releaseState?.(context);
   }
 
   /**
@@ -215,7 +299,7 @@ export class ToolHandler {
     onTimeout: () => void,
   ): Promise<T> {
     const timeoutError = new ToolCallTimeoutError(
-      `Tool "${this.tool.name}" timed out after ${TOOL_CALL_TIMEOUT_MS}ms waiting for the browser connection to be established. The connection attempt will be retried automatically on the next tool call.`,
+      `Tool "${this.#tool.name}" timed out after ${TOOL_CALL_TIMEOUT_MS}ms waiting for the browser connection to be established. The connection attempt will be retried automatically on the next tool call.`,
     );
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
@@ -234,29 +318,48 @@ export class ToolHandler {
     }
   }
 
-  handle = async (params: Record<string, unknown>): Promise<CallToolResult> => {
+  handle = async (
+    validatedParams: Record<string, unknown>,
+  ): Promise<CallToolResult> => {
+    const schemaVersionAtCall =
+      this.#validatedParamsVersion.get(validatedParams) ?? this.#schemaVersion;
     using guard = await this.toolMutex.acquire();
 
-    if (this.disabledReason) {
+    if (this.#disabledReason) {
       return {
         content: [
           {
             type: 'text',
-            text: this.disabledReason,
+            text: this.#disabledReason,
           },
         ],
         isError: true,
       };
     }
 
+    const tool = this.#tool;
+    const serverArgs = this.#serverArgs;
+    if (schemaVersionAtCall !== this.#schemaVersion) {
+      // The tool was updated while this call waited for the mutex, so the
+      // params were validated against the previous schema.
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `The input schema of tool ${tool.name} changed because the server configuration was reloaded. List the tools again and retry the call with the new parameters.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    const params = validatedParams;
+
     const startTime = Date.now();
     let success = false;
     let devToolsData: DevToolsData | undefined;
     let pageUrl: string | undefined;
     try {
-      logger?.(
-        `${this.tool.name} request: ${JSON.stringify(params, null, '  ')}`,
-      );
+      logger?.(`${tool.name} request: ${JSON.stringify(params, null, '  ')}`);
       // ensureBrowser() has no cancellation mechanism, so this timeout only
       // stops us from waiting — the attempt itself keeps running abandoned.
       // abandonPendingBrowserAttemptOnTimeout() tells BrowserManager to
@@ -266,33 +369,33 @@ export class ToolHandler {
       const context = await this.#raceWithTimeout(this.getContext(), () =>
         this.abandonPendingBrowserAttemptOnTimeout(),
       );
-      logger?.(`${this.tool.name} context: resolved`);
-      const response = this.serverArgs.slim
-        ? new SlimMcpResponse(this.serverArgs)
-        : new McpResponse(this.serverArgs);
+      logger?.(`${tool.name} context: resolved`);
+      const response = isSlimTool(tool)
+        ? new SlimMcpResponse(serverArgs)
+        : new McpResponse(serverArgs);
 
-      response.setRedactNetworkHeaders(this.serverArgs.redactNetworkHeaders);
+      response.setRedactNetworkHeaders(serverArgs.redactNetworkHeaders);
       if (context.consumeReconnectNotice()) {
         response.setReconnectNotice();
       }
       let page: McpPage | undefined;
       try {
-        await validateToolFiles(this.tool, params, context);
-        if (isPageScopedTool(this.tool)) {
+        await validateToolFiles(tool, params, context);
+        if (isPageScopedTool(tool)) {
           const pageId =
             typeof params.pageId === 'number' ? params.pageId : undefined;
           page =
-            this.serverArgs.pageIdRouting &&
+            serverArgs.pageIdRouting &&
             pageId !== undefined &&
-            !isSlimTool(this.tool)
+            !isSlimTool(tool)
               ? context.getPageById(pageId)
               : context.getSelectedMcpPage();
           await page?.init();
           response.setPage(page);
-          if (this.tool.blockedByDialog) {
+          if (tool.blockedByDialog) {
             page.throwIfDialogOpen();
           }
-          await this.tool.handler(
+          await tool.handler(
             {
               params,
               page,
@@ -301,7 +404,7 @@ export class ToolHandler {
             context,
           );
         } else {
-          await this.tool.handler(
+          await tool.handler(
             {
               params,
             },
@@ -317,8 +420,8 @@ export class ToolHandler {
       // --experimentalDataFormat takes precedence over the legacy
       // --experimentalToonFormat.
       const dataFormat =
-        this.serverArgs.experimentalDataFormat ??
-        (this.serverArgs.experimentalToonFormat ? 'toon' : 'default');
+        serverArgs.experimentalDataFormat ??
+        (serverArgs.experimentalToonFormat ? 'toon' : 'default');
       const {content, structuredContent} = await response.handle(
         context,
         dataFormat,
@@ -332,12 +435,12 @@ export class ToolHandler {
         result.isError = true;
       }
       success = true;
-      if (this.serverArgs.experimentalStructuredContent) {
+      if (serverArgs.experimentalStructuredContent) {
         result.structuredContent = structuredContent as Record<string, unknown>;
       }
       return result;
     } catch (err) {
-      logger?.(`${this.tool.name} error:`, err, err?.stack);
+      logger?.(`${tool.name} error:`, err, err?.stack);
       let errorText = err && 'message' in err ? err.message : String(err);
       if ('cause' in err && err.cause) {
         errorText += `\nCause: ${err.cause.message}`;
@@ -353,9 +456,9 @@ export class ToolHandler {
       };
     } finally {
       void ClearcutLogger.get()?.logToolInvocation({
-        toolName: this.tool.name,
+        toolName: tool.name,
         params,
-        schema: this.inputSchema,
+        schema: tool.schema,
         success,
         latencyMs: Date.now() - startTime,
         devToolsData,
