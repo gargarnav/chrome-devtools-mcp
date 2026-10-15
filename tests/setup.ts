@@ -4,14 +4,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import '../src/utils/polyfill.js';
-
+import {registerHooks} from 'node:module';
 import path from 'node:path';
-import {before, it} from 'node:test';
+import {beforeEach, it} from 'node:test';
 
-import {overrideDevToolsGlobals} from '../src/devtools/DevtoolsUtils.js';
+// Records if the test file loads DevTools through src/third_party/index.js.
+let thirdPartyLoaded = false;
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const result = nextResolve(specifier, context);
+    if (result.url.endsWith('/src/third_party/index.js')) {
+      thirdPartyLoaded = true;
+    }
+    return result;
+  },
+});
 
-before(() => {
+// The polyfill imports src/third_party/index.js, which takes about half a
+// second to load. Load it only on Node versions without DisposableStack.
+// Register the hook above first, so that this import is also recorded.
+if (!('DisposableStack' in globalThis)) {
+  await import('../src/utils/polyfill.js');
+}
+
+// The root `before` hook runs before the test file is loaded, so check in
+// `beforeEach`, which runs after it. Override the DevTools globals one time,
+// and only for test files that load DevTools. Other test files do not pay
+// for the large import.
+let devToolsGlobalsOverridden = false;
+beforeEach(async () => {
+  if (devToolsGlobalsOverridden || !thirdPartyLoaded) {
+    return;
+  }
+  devToolsGlobalsOverridden = true;
+  const {overrideDevToolsGlobals} =
+    await import('../src/devtools/DevtoolsUtils.js');
   overrideDevToolsGlobals({
     loadResource: async () => '',
   });
