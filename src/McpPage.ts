@@ -363,6 +363,18 @@ export class McpPage implements ContextPage {
     }
   }
 
+  setSourceMaps(sourceMaps: boolean): void {
+    this.#sourceMaps = sourceMaps;
+    if (this.#devtoolsUniverse) {
+      this.#devtoolsUniverse.universe.settings
+        .resolve(DevTools.SDKSettings.jsSourceMapsEnabledSettingDescriptor)
+        .set(sourceMaps);
+      this.#devtoolsUniverse.universe.settings
+        .resolve(DevTools.SDKSettings.cssSourceMapsEnabledSettingDescriptor)
+        .set(sourceMaps);
+    }
+  }
+
   get devtoolsUniverse(): TargetUniverse | undefined {
     return this.#devtoolsUniverse;
   }
@@ -559,6 +571,11 @@ export class McpPage implements ContextPage {
     return this.#commentBridge;
   }
 
+  disposeCommentBridge(): void {
+    this.#commentBridge?.dispose();
+    this.#commentBridge = undefined;
+  }
+
   /**
    * Returns the comment bridge attached to the DevTools page, or undefined if
    * the DevTools page does not support DevTools comments.
@@ -674,8 +691,7 @@ export class McpPage implements ContextPage {
 
   dispose(): void {
     this.#disposed = true;
-    this.#commentBridge?.dispose();
-    this.#commentBridge = undefined;
+    this.disposeCommentBridge();
     this.#pptrPage?.off('dialog', this.#dialogHandler);
     this.#networkCollector?.dispose();
     this.#consoleCollector?.dispose();

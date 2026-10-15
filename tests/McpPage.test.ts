@@ -16,6 +16,7 @@ import type {JSONSchema7Definition} from '../src/third_party/index.js';
 import {TextSnapshot} from '../src/TextSnapshot.js';
 import type {TextSnapshotNode} from '../src/types.js';
 import {
+  createMockCDPSession,
   createMockMcpResponse,
   createMockPuppeteerPage,
   createMockPuppeteerTarget,
@@ -1043,6 +1044,86 @@ describe('McpPage', () => {
       assert.notStrictEqual(mcpPage.commentBridge, undefined);
       sinon.assert.calledOnce(devtoolsPage.exposeFunction);
       sinon.assert.calledThrice(devtoolsPage.evaluate);
+    });
+
+    it('disposes and clears commentBridge on mcpPage.disposeCommentBridge()', async () => {
+      const {mcpPage, pptrPage} = await createMcpPage();
+      const devtoolsPage = createMockPuppeteerPage();
+      pptrPage.openDevTools.resolves(devtoolsPage);
+
+      await mcpPage.openDevTools();
+      const bridge = mcpPage.commentBridge;
+      assert.notStrictEqual(bridge, undefined);
+
+      if (bridge) {
+        const disposeSpy = sinon.spy(bridge, 'dispose');
+        mcpPage.disposeCommentBridge();
+
+        sinon.assert.calledOnceWithExactly(disposeSpy);
+        assert.strictEqual(mcpPage.commentBridge, undefined);
+      }
+    });
+  });
+
+  describe('setSourceMaps()', () => {
+    afterEach(() => {
+      sinon.restore();
+    });
+
+    it('updates JS and CSS source map settings on an initialized DevTools universe', async () => {
+      const pptrPage = createMockPuppeteerPage();
+      pptrPage.createCDPSession.resolves(createMockCDPSession());
+      const target = createMockPuppeteerTarget({page: pptrPage});
+      const mcpPage = new McpPage(target, 1, {
+        hasNetworkBlockOrAllowlist: false,
+        locatorClass: Locator,
+      });
+      await mcpPage.init();
+
+      mcpPage.setSourceMaps(false);
+
+      const settings = mcpPage.devtoolsUniverse?.universe.settings;
+      assert.ok(settings);
+      assert.strictEqual(
+        settings
+          .resolve(DevTools.SDKSettings.jsSourceMapsEnabledSettingDescriptor)
+          .get(),
+        false,
+      );
+      assert.strictEqual(
+        settings
+          .resolve(DevTools.SDKSettings.cssSourceMapsEnabledSettingDescriptor)
+          .get(),
+        false,
+      );
+    });
+
+    it('applies updated sourceMaps setting when initialized later', async () => {
+      const pptrPage = createMockPuppeteerPage();
+      pptrPage.createCDPSession.resolves(createMockCDPSession());
+      const target = createMockPuppeteerTarget({page: pptrPage});
+      const mcpPage = new McpPage(target, 1, {
+        hasNetworkBlockOrAllowlist: false,
+        locatorClass: Locator,
+      });
+
+      mcpPage.setSourceMaps(false);
+      await mcpPage.init();
+
+      const settings = mcpPage.devtoolsUniverse?.universe.settings;
+      assert.ok(settings);
+      assert.strictEqual(
+        settings
+          .resolve(DevTools.SDKSettings.jsSourceMapsEnabledSettingDescriptor)
+          .get(),
+        false,
+      );
+      assert.strictEqual(
+        settings
+          .resolve(DevTools.SDKSettings.cssSourceMapsEnabledSettingDescriptor)
+          .get(),
+        false,
+      );
     });
   });
 

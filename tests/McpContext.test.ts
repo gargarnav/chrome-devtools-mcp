@@ -19,11 +19,27 @@ import {McpContext} from '../src/McpContext.js';
 import {McpPage} from '../src/McpPage.js';
 import {HeapSnapshotManager} from '../src/processors/HeapSnapshotManager.js';
 import {TextSnapshot} from '../src/TextSnapshot.js';
-import {type HTTPResponse} from '../src/third_party/index.js';
-import type {TraceResult} from '../src/processors/PerformanceTrace.js';
+import {
+  type Browser,
+  type HTTPResponse,
+  ScreenRecorder,
+  type Target,
+  TargetType,
+} from '../src/third_party/index.js';
+import {
+  parseRawTraceBuffer,
+  type TraceResult,
+  traceResultIsSuccess,
+} from '../src/processors/PerformanceTrace.js';
 import {resolveCanonicalPath} from '../src/utils/files.js';
 
+import {
+  createMockPuppeteerBrowser,
+  createMockPuppeteerPage,
+  createMockPuppeteerTarget,
+} from './mocks.js';
 import {serverHooks, TestServer} from './server.js';
+import {loadTraceAsBuffer} from './trace-processing/fixtures/load.js';
 import {
   assertNoServiceWorkerReported,
   createTempDir,
@@ -49,6 +65,37 @@ describe('McpContext', () => {
   afterEach(() => {
     sinon.restore();
   });
+
+  async function createMockContext(options?: {
+    browser?: sinon.SinonStubbedInstance<Browser>;
+    performanceCrux?: boolean;
+    sourceMaps?: boolean;
+    experimentalIncludeAllPages?: boolean;
+    allowUnrestrictedPaths?: boolean;
+    onNotification?: (message: string) => void;
+    heapSnapshotManager?: HeapSnapshotManager;
+    targets?: Target[];
+  }) {
+    const browser = options?.browser ?? createMockPuppeteerBrowser();
+    const defaultTarget = createMockPuppeteerTarget();
+    browser.targets.returns(options?.targets ?? [defaultTarget]);
+    return await McpContext.from(
+      browser,
+      undefined,
+      {
+        experimentalDevToolsDebugging: false,
+        performanceCrux: options?.performanceCrux ?? true,
+        sourceMaps:
+          options && 'sourceMaps' in options ? options.sourceMaps : true,
+        experimentalIncludeAllPages: options?.experimentalIncludeAllPages,
+        allowUnrestrictedPaths: options?.allowUnrestrictedPaths,
+        onNotification: options?.onNotification,
+        heapSnapshotManager:
+          options?.heapSnapshotManager ?? new HeapSnapshotManager(),
+      },
+      Locator,
+    );
+  }
 
   it('list pages', async () => {
     await withMcpContext(async (_response, context) => {
@@ -294,6 +341,89 @@ describe('McpContext', () => {
       // next response, or after an explicit select), so the note is not repeated.
       await context.createPagesSnapshot();
       assert.strictEqual(context.getSelectedPageFallback(), undefined);
+    });
+  });
+
+  it('preserves an unread fallback across snapshots until read', async () => {
+    const browser = createMockPuppeteerBrowser();
+    const firstTarget = createMockPuppeteerTarget();
+    const secondPptrPage = createMockPuppeteerPage();
+    const secondTarget = createMockPuppeteerTarget({page: secondPptrPage});
+    const context = await createMockContext({
+      browser,
+      targets: [firstTarget, secondTarget],
+    });
+    const [, secondPage] = context.getPages();
+    assert.ok(secondPage);
+    context.selectPage(secondPage);
+    await secondPage.init();
+
+    secondPptrPage.isClosed.returns(true);
+    browser.targets.returns([firstTarget]);
+
+    // First snapshot (e.g. from applyConfig) detects the fallback.
+    await context.createPagesSnapshot();
+    // Second snapshot (e.g. from McpResponse.#handleSnapshot) runs before the
+    // fallback has been read by the response formatter.
+    await context.createPagesSnapshot();
+
+    assert.deepStrictEqual(context.getSelectedPageFallback(), {
+      wasClosed: true,
+    });
+
+    await context.createPagesSnapshot();
+    assert.strictEqual(context.getSelectedPageFallback(), undefined);
+  });
+
+  it('falls back when the selected page is no longer a valid page target', async () => {
+    const regularTarget = createMockPuppeteerTarget();
+    const bgTarget = createMockPuppeteerTarget({
+      type: TargetType.BACKGROUND_PAGE,
+    });
+    const context = await createMockContext({
+      experimentalIncludeAllPages: true,
+      targets: [regularTarget, bgTarget],
+    });
+    const [regularPage, bgPage] = context.getPages();
+    assert.ok(regularPage);
+    assert.ok(bgPage);
+    context.selectPage(bgPage);
+    const disposeSpy = sinon.spy(bgPage, 'dispose');
+
+    context.updateOptions({
+      experimentalIncludeAllPages: false,
+      performanceCrux: true,
+    });
+    await context.createPagesSnapshot();
+
+    assert.ok(context.isPageSelected(regularPage));
+    sinon.assert.calledOnceWithExactly(disposeSpy);
+    assert.deepStrictEqual(context.getSelectedPageFallback(), {
+      wasClosed: false,
+    });
+  });
+
+  it('clears the selection when the selected page is no longer a valid page target and no other pages exist', async () => {
+    const bgTarget = createMockPuppeteerTarget({
+      type: TargetType.BACKGROUND_PAGE,
+    });
+    const context = await createMockContext({
+      experimentalIncludeAllPages: true,
+      targets: [bgTarget],
+    });
+    const bgPage = context.getSelectedMcpPage();
+    const disposeSpy = sinon.spy(bgPage, 'dispose');
+
+    context.updateOptions({
+      experimentalIncludeAllPages: false,
+      performanceCrux: true,
+    });
+    await context.createPagesSnapshot();
+
+    sinon.assert.calledOnceWithExactly(disposeSpy);
+    assert.throws(() => context.getSelectedMcpPage(), /No page selected/);
+    assert.deepStrictEqual(context.getSelectedPageFallback(), {
+      wasClosed: false,
     });
   });
 
@@ -1053,6 +1183,179 @@ describe('McpContext', () => {
           assert.strictEqual(result, undefined);
         });
       });
+    });
+  });
+
+  describe('updateOptions', () => {
+    it('updates the CrUX setting', async () => {
+      const context = await createMockContext({performanceCrux: true});
+
+      context.updateOptions({performanceCrux: false});
+
+      assert.strictEqual(context.isCruxEnabled(), false);
+    });
+
+    it('updates allowUnrestrictedPaths', async () => {
+      const context = await createMockContext({allowUnrestrictedPaths: false});
+      const outsidePath = path.resolve(os.homedir(), 'anywhere.txt');
+      await assert.rejects(context.validatePath(outsidePath), /Access denied/);
+
+      context.updateOptions({
+        performanceCrux: true,
+        allowUnrestrictedPaths: true,
+      });
+
+      assert.strictEqual(
+        await context.validatePath(outsidePath),
+        await resolveCanonicalPath(outsidePath),
+      );
+    });
+
+    it('updates sourceMaps on existing pages only when changed', async () => {
+      const context = await createMockContext({sourceMaps: undefined});
+      const mcpPage = context.getSelectedMcpPage();
+      const setSourceMapsSpy = sinon.spy(mcpPage, 'setSourceMaps');
+
+      context.updateOptions({performanceCrux: true, sourceMaps: true});
+      sinon.assert.notCalled(setSourceMapsSpy);
+
+      context.updateOptions({performanceCrux: true, sourceMaps: false});
+      sinon.assert.calledOnceWithExactly(setSourceMapsSpy, false);
+
+      setSourceMapsSpy.resetHistory();
+      context.updateOptions({performanceCrux: false, sourceMaps: false});
+      sinon.assert.notCalled(setSourceMapsSpy);
+    });
+  });
+
+  describe('releaseState', () => {
+    it('stops and clears the screencast recording and notifies', async () => {
+      const onNotification = sinon.stub();
+      const context = await createMockContext({onNotification});
+      const page = context.getSelectedMcpPage();
+      const recorder = sinon.createStubInstance(ScreenRecorder);
+      recorder.stop.resolves();
+      page.setScreenRecorder({recorder, filePath: '/tmp/video.mp4'});
+
+      await context.releaseState({
+        screencast: true,
+        heapSnapshots: false,
+        performanceTrace: false,
+      });
+
+      sinon.assert.calledOnceWithExactly(recorder.stop);
+      assert.strictEqual(page.getScreenRecorder(), null);
+      sinon.assert.calledOnceWithExactly(
+        onNotification,
+        'The screencast recording was stopped and saved to /tmp/video.mp4 because screencast tools were disabled.',
+      );
+    });
+
+    it('does not notify when stopping the screencast recording fails', async () => {
+      const onNotification = sinon.stub();
+      const context = await createMockContext({onNotification});
+      const page = context.getSelectedMcpPage();
+      const recorder = sinon.createStubInstance(ScreenRecorder);
+      recorder.stop.rejects(new Error('ffmpeg error'));
+      page.setScreenRecorder({recorder, filePath: '/tmp/video.mp4'});
+
+      await context.releaseState({
+        screencast: true,
+        heapSnapshots: false,
+        performanceTrace: false,
+      });
+
+      sinon.assert.calledOnceWithExactly(recorder.stop);
+      assert.strictEqual(page.getScreenRecorder(), null);
+      sinon.assert.notCalled(onNotification);
+    });
+
+    it('keeps the screencast recording when not released', async () => {
+      const onNotification = sinon.stub();
+      const context = await createMockContext({onNotification});
+      const page = context.getSelectedMcpPage();
+      const recorder = sinon.createStubInstance(ScreenRecorder);
+      const data = {recorder, filePath: '/tmp/video.mp4'};
+      page.setScreenRecorder(data);
+
+      await context.releaseState({
+        screencast: false,
+        heapSnapshots: true,
+        performanceTrace: true,
+      });
+
+      sinon.assert.notCalled(recorder.stop);
+      assert.strictEqual(page.getScreenRecorder(), data);
+      sinon.assert.notCalled(onNotification);
+    });
+
+    it('disposes loaded heap snapshots and notifies', async () => {
+      const onNotification = sinon.stub();
+      const heapSnapshotManager = new HeapSnapshotManager();
+      const context = await createMockContext({
+        onNotification,
+        heapSnapshotManager,
+      });
+      await context.getHeapSnapshotStats(
+        path.join(process.cwd(), 'tests/fixtures/example.heapsnapshot'),
+      );
+
+      await context.releaseState({
+        screencast: false,
+        heapSnapshots: true,
+        performanceTrace: false,
+      });
+
+      assert.strictEqual(heapSnapshotManager.hasSnapshots(), false);
+      sinon.assert.calledOnceWithExactly(
+        onNotification,
+        'Loaded heap snapshots were closed because memory tools were disabled.',
+      );
+    });
+
+    it('stops the running performance trace, clears recorded traces, and notifies', async () => {
+      const onNotification = sinon.stub();
+      const context = await createMockContext({onNotification});
+      const pptrPage = createMockPuppeteerPage();
+      pptrPage.tracing.stop.resolves();
+      context.setIsRunningPerformanceTrace(true, pptrPage);
+      const traceResult = await parseRawTraceBuffer(
+        loadTraceAsBuffer('basic-trace.json.gz'),
+      );
+      assert.ok(traceResultIsSuccess(traceResult));
+      context.storeTraceRecording(traceResult);
+
+      await context.releaseState({
+        screencast: false,
+        heapSnapshots: false,
+        performanceTrace: true,
+      });
+
+      sinon.assert.calledOnceWithExactly(pptrPage.tracing.stop);
+      assert.strictEqual(context.isRunningPerformanceTrace(), false);
+      assert.deepStrictEqual(context.recordedTraces(), []);
+      sinon.assert.calledOnceWithExactly(
+        onNotification,
+        'The running performance trace was discarded because performance tools were disabled.',
+      );
+    });
+
+    it('disposes comment bridges once per page when devtoolsComments is released', async () => {
+      const context = await createMockContext();
+      const mcpPage = context.getSelectedMcpPage();
+      const disposeCommentBridgeSpy = sinon.spy(
+        mcpPage,
+        'disposeCommentBridge',
+      );
+
+      await context.releaseState({
+        screencast: false,
+        heapSnapshots: false,
+        performanceTrace: false,
+        devtoolsComments: true,
+      });
+
+      sinon.assert.calledOnceWithExactly(disposeCommentBridgeSpy);
     });
   });
 
