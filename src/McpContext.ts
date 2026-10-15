@@ -182,7 +182,7 @@ export class McpContext implements Context {
 
   #allMcpPages(): Set<McpPage> {
     const pages = new Set(this.#mcpPages.values());
-    if (this.#selectedPage) {
+    if (this.#selectedPage && !this.#selectedPage.isClosed()) {
       pages.add(this.#selectedPage);
     }
     return pages;
@@ -196,12 +196,10 @@ export class McpContext implements Context {
     this.#options = {...this.#options, ...options};
     this.#allowUnrestrictedPaths =
       this.#options.allowUnrestrictedPaths ?? false;
-    if (
-      options.sourceMaps !== undefined &&
-      options.sourceMaps !== previousSourceMaps
-    ) {
+    const nextSourceMaps = this.#options.sourceMaps ?? true;
+    if (nextSourceMaps !== previousSourceMaps) {
       for (const mcpPage of this.#allMcpPages()) {
-        mcpPage.setSourceMaps(options.sourceMaps);
+        mcpPage.setSourceMaps(nextSourceMaps);
       }
     }
   }
@@ -755,7 +753,7 @@ export class McpContext implements Context {
         // first connect, when there was no prior selection to replace.
         const fallback = this.#selectedPage
           ? {wasClosed: this.#selectedPage.isClosed()}
-          : undefined;
+          : this.#selectedPageFallback;
         this.selectPage(pages[0]);
         if (fallback) {
           this.#selectedPageFallback = fallback;

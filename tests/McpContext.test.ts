@@ -427,6 +427,68 @@ describe('McpContext', () => {
     });
   });
 
+  it('preserves an unread fallback when the selection is cleared and a later snapshot selects a new page', async () => {
+    const browser = createMockPuppeteerBrowser();
+    const bgTarget = createMockPuppeteerTarget({
+      type: TargetType.BACKGROUND_PAGE,
+    });
+    const context = await createMockContext({
+      browser,
+      experimentalIncludeAllPages: true,
+      targets: [bgTarget],
+    });
+
+    context.updateOptions({
+      experimentalIncludeAllPages: false,
+      performanceCrux: true,
+    });
+    await context.createPagesSnapshot();
+    assert.throws(() => context.getSelectedMcpPage(), /No page selected/);
+
+    const regularTarget = createMockPuppeteerTarget();
+    browser.targets.returns([regularTarget, bgTarget]);
+    await context.createPagesSnapshot();
+
+    const [regularPage] = context.getPages();
+    assert.ok(regularPage);
+    assert.ok(context.isPageSelected(regularPage));
+    assert.deepStrictEqual(context.getSelectedPageFallback(), {
+      wasClosed: false,
+    });
+  });
+
+  it('does not operate on a closed and already-disposed selected page in updateOptions or releaseState', async () => {
+    const browser = createMockPuppeteerBrowser();
+    const pptrPage = createMockPuppeteerPage();
+    const target = createMockPuppeteerTarget({page: pptrPage});
+    const context = await createMockContext({
+      browser,
+      targets: [target],
+    });
+    const page = context.getSelectedMcpPage();
+    pptrPage.isClosed.returns(true);
+    browser.targets.returns([]);
+
+    await context.createPagesSnapshot();
+
+    const setSourceMapsSpy = sinon.spy(page, 'setSourceMaps');
+    const disposeCommentBridgeSpy = sinon.spy(page, 'disposeCommentBridge');
+    const disposeSpy = sinon.spy(page, 'dispose');
+
+    context.updateOptions({performanceCrux: true, sourceMaps: false});
+    await context.releaseState({
+      screencast: true,
+      heapSnapshots: false,
+      performanceTrace: false,
+      devtoolsComments: true,
+    });
+    context.dispose();
+
+    sinon.assert.notCalled(setSourceMapsSpy);
+    sinon.assert.notCalled(disposeCommentBridgeSpy);
+    sinon.assert.notCalled(disposeSpy);
+  });
+
   it('does not report a fallback for a regular selection', async () => {
     await withMcpContext(async (_response, context) => {
       await context.newPage();
@@ -1225,6 +1287,9 @@ describe('McpContext', () => {
       setSourceMapsSpy.resetHistory();
       context.updateOptions({performanceCrux: false, sourceMaps: false});
       sinon.assert.notCalled(setSourceMapsSpy);
+
+      context.updateOptions({performanceCrux: false, sourceMaps: undefined});
+      sinon.assert.calledOnceWithExactly(setSourceMapsSpy, true);
     });
   });
 

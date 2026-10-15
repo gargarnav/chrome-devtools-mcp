@@ -184,6 +184,7 @@ export class McpPage implements ContextPage {
   #navigationTimeout: number;
   #sourceMaps: boolean;
   #commentBridge?: DevToolsCommentBridge;
+  #commentBridgeDisposed = false;
   #onNotification?: (message: string) => void;
 
   constructor(
@@ -572,6 +573,7 @@ export class McpPage implements ContextPage {
   }
 
   disposeCommentBridge(): void {
+    this.#commentBridgeDisposed = true;
     this.#commentBridge?.dispose();
     this.#commentBridge = undefined;
   }
@@ -583,6 +585,7 @@ export class McpPage implements ContextPage {
   async ensureDevToolsCommentBridge(
     devtoolsPage: Page,
   ): Promise<DevToolsCommentBridge | undefined> {
+    this.#commentBridgeDisposed = false;
     if (!this.#commentBridge) {
       this.#commentBridge = new DevToolsCommentBridge({
         onNotification: this.#onNotification,
@@ -692,6 +695,13 @@ export class McpPage implements ContextPage {
   dispose(): void {
     this.#disposed = true;
     this.disposeCommentBridge();
+    if (this.#screenRecorder) {
+      const {recorder} = this.#screenRecorder;
+      this.#screenRecorder = null;
+      void recorder.stop().catch(e => {
+        logger?.('Failed to stop screencast recording on dispose', e);
+      });
+    }
     this.#pptrPage?.off('dialog', this.#dialogHandler);
     this.#networkCollector?.dispose();
     this.#consoleCollector?.dispose();
@@ -1096,10 +1106,11 @@ export class McpPage implements ContextPage {
         logger?.('No DevTools page detected');
         return {};
       }
-      await this.ensureDevToolsCommentBridge(devtoolsPage);
+      if (!this.#commentBridgeDisposed) {
+        await this.ensureDevToolsCommentBridge(devtoolsPage);
+      }
       const {cdpRequestId, cdpBackendNodeId} = await devtoolsPage.evaluate(
         async () => {
-          window.universe?.cd4aBridge?.setAgentAttached(true);
           // @ts-expect-error no types
           const UI = await import('/bundled/ui/legacy/legacy.js');
           // @ts-expect-error no types

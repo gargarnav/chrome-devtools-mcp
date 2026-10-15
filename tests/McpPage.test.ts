@@ -11,7 +11,7 @@ import sinon from 'sinon';
 
 import type {TargetUniverse} from '../src/devtools/DevtoolsUtils.js';
 import {McpPage, replaceHtmlElementsWithUids} from '../src/McpPage.js';
-import {DevTools, Locator} from '../src/third_party/index.js';
+import {DevTools, Locator, ScreenRecorder} from '../src/third_party/index.js';
 import type {JSONSchema7Definition} from '../src/third_party/index.js';
 import {TextSnapshot} from '../src/TextSnapshot.js';
 import type {TextSnapshotNode} from '../src/types.js';
@@ -394,6 +394,22 @@ describe('McpPage', () => {
         runBeforeUnload: false,
       });
       sinon.assert.notCalled(pptrPage.emulateFocusedPage);
+    });
+
+    it('stops and clears an active screenRecorder on dispose()', async () => {
+      const target = createMockPuppeteerTarget();
+      const mcpPage = new McpPage(target, 1, {
+        hasNetworkBlockOrAllowlist: false,
+        locatorClass: Locator,
+      });
+      const recorder = sinon.createStubInstance(ScreenRecorder);
+      recorder.stop.resolves();
+      mcpPage.setScreenRecorder({recorder, filePath: '/tmp/video.mp4'});
+
+      mcpPage.dispose();
+
+      sinon.assert.calledOnceWithExactly(recorder.stop);
+      assert.strictEqual(mcpPage.getScreenRecorder(), null);
     });
   });
 
@@ -1062,6 +1078,52 @@ describe('McpPage', () => {
         sinon.assert.calledOnceWithExactly(disposeSpy);
         assert.strictEqual(mcpPage.commentBridge, undefined);
       }
+    });
+
+    it('does not re-attach commentBridge in getDevToolsData() after disposeCommentBridge()', async () => {
+      const {mcpPage, pptrPage} = await createMcpPage();
+      pptrPage.hasDevTools.resolves(true);
+      const devtoolsPage = createMockPuppeteerPage();
+      devtoolsPage.evaluate.resolves(true);
+      pptrPage.openDevTools.resolves(devtoolsPage);
+
+      await mcpPage.openDevTools();
+      assert.notStrictEqual(mcpPage.commentBridge, undefined);
+
+      mcpPage.disposeCommentBridge();
+      assert.strictEqual(mcpPage.commentBridge, undefined);
+      devtoolsPage.exposeFunction.resetHistory();
+      devtoolsPage.evaluate.reset();
+      devtoolsPage.evaluate.resolves({
+        cdpRequestId: 'req-2',
+        cdpBackendNodeId: 20,
+      });
+
+      const data = await mcpPage.getDevToolsData();
+
+      assert.deepStrictEqual(data, {
+        cdpRequestId: 'req-2',
+        cdpBackendNodeId: 20,
+      });
+      assert.strictEqual(mcpPage.commentBridge, undefined);
+      sinon.assert.notCalled(devtoolsPage.exposeFunction);
+      sinon.assert.calledOnce(devtoolsPage.evaluate);
+    });
+
+    it('re-attaches commentBridge when ensureDevToolsCommentBridge() is called after disposeCommentBridge()', async () => {
+      const {mcpPage, pptrPage} = await createMcpPage();
+      const devtoolsPage = createMockPuppeteerPage();
+      devtoolsPage.evaluate.resolves(true);
+      pptrPage.openDevTools.resolves(devtoolsPage);
+
+      await mcpPage.openDevTools();
+      mcpPage.disposeCommentBridge();
+      assert.strictEqual(mcpPage.commentBridge, undefined);
+
+      const bridge = await mcpPage.ensureDevToolsCommentBridge(devtoolsPage);
+
+      assert.notStrictEqual(bridge, undefined);
+      assert.strictEqual(bridge, mcpPage.commentBridge);
     });
   });
 
