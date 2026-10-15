@@ -96,17 +96,6 @@ export type LiveMcpContextOptions = Pick<
   | 'allowUnrestrictedPaths'
 >;
 
-/**
- * State owned by tools that should be released because the tools that manage
- * it are no longer available.
- */
-export interface ReleasableState {
-  screencast: boolean;
-  heapSnapshots: boolean;
-  performanceTrace: boolean;
-  devtoolsComments?: boolean;
-}
-
 // Page ids are handed out from a process-wide counter so they stay unique
 // across all contexts, in particular across browser reconnects. An id issued
 // before a reconnect then fails to resolve instead of hitting an unrelated
@@ -205,54 +194,67 @@ export class McpContext implements Context {
   }
 
   /**
-   * Stops recordings and frees resources that can no longer be managed
-   * because the corresponding tools were disabled by a config reload. A
-   * screencast is stopped and saved, a running trace is discarded.
+   * Stops and saves active screencast recordings across all pages when
+   * screencast tools are disabled.
    */
-  async releaseState(state: ReleasableState): Promise<void> {
-    if (state.screencast) {
-      for (const mcpPage of this.#allMcpPages()) {
-        const screenRecorderData = mcpPage.getScreenRecorder();
-        if (!screenRecorderData) {
-          continue;
-        }
-        const {recorder, filePath} = screenRecorderData;
-        mcpPage.setScreenRecorder(null);
-        try {
-          await recorder.stop();
-          this.#notify(
-            `The screencast recording was stopped and saved to ${filePath} because screencast tools were disabled.`,
-          );
-        } catch (err) {
-          this.logger?.('Failed to stop the screencast recording', err);
-        }
+  async releaseScreencasts(): Promise<void> {
+    for (const mcpPage of this.#allMcpPages()) {
+      const screenRecorderData = mcpPage.getScreenRecorder();
+      if (!screenRecorderData) {
+        continue;
+      }
+      const {recorder, filePath} = screenRecorderData;
+      mcpPage.setScreenRecorder(null);
+      try {
+        await recorder.stop();
+        this.#notify(
+          `The screencast recording was stopped and saved to ${filePath} because screencast tools were disabled.`,
+        );
+      } catch (err) {
+        this.logger?.('Failed to stop the screencast recording', err);
       }
     }
-    if (state.heapSnapshots && this.#heapSnapshotManager.hasSnapshots()) {
+  }
+
+  /**
+   * Closes all loaded heap snapshots when memory tools are disabled.
+   */
+  releaseHeapSnapshots(): void {
+    if (this.#heapSnapshotManager.hasSnapshots()) {
       this.#heapSnapshotManager.dispose();
       this.#notify(
         'Loaded heap snapshots were closed because memory tools were disabled.',
       );
     }
-    if (state.performanceTrace) {
-      this.#traceResults = [];
-      if (this.#isRunningTrace) {
-        const page = this.#tracingPage;
-        this.setIsRunningPerformanceTrace(false);
-        try {
-          await page?.tracing.stop();
-        } catch (err) {
-          this.logger?.('Failed to stop the performance trace', err);
-        }
-        this.#notify(
-          'The running performance trace was discarded because performance tools were disabled.',
-        );
+  }
+
+  /**
+   * Discards recorded performance traces and stops any running trace when
+   * performance tools are disabled.
+   */
+  async releasePerformanceTrace(): Promise<void> {
+    this.#traceResults = [];
+    if (this.#isRunningTrace) {
+      const page = this.#tracingPage;
+      this.setIsRunningPerformanceTrace(false);
+      try {
+        await page?.tracing.stop();
+      } catch (err) {
+        this.logger?.('Failed to stop the performance trace', err);
       }
+      this.#notify(
+        'The running performance trace was discarded because performance tools were disabled.',
+      );
     }
-    if (state.devtoolsComments) {
-      for (const mcpPage of this.#allMcpPages()) {
-        mcpPage.disposeCommentBridge();
-      }
+  }
+
+  /**
+   * Disposes DevTools comment bridges across all pages when DevTools comment
+   * tools are disabled.
+   */
+  releaseDevToolsComments(): void {
+    for (const mcpPage of this.#allMcpPages()) {
+      mcpPage.disposeCommentBridge();
     }
   }
 

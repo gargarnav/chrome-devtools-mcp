@@ -269,6 +269,10 @@ export const closeHeapSnapshot = defineTool(() => ({
       .describe('A path to the .heapsnapshot file to close.'),
   },
   blockedByDialog: false,
+  reloadable: true,
+  releaseState: context => {
+    context.releaseHeapSnapshots();
+  },
   handler: async (request, response, context) => {
     const closed = await context.closeHeapSnapshot(request.params.filePath);
     if (!closed) {

@@ -444,6 +444,15 @@ describe('screencast', () => {
       sinon.assert.calledOnce(mockRecording.stop);
       sinon.assert.calledOnceWithExactly(page.setScreenRecorder, null);
     });
+
+    it('releases screencasts on context when disabled', async () => {
+      const {context, args} = createScreencastMocks();
+      context.releaseScreencasts.resolves();
+
+      await stopScreencast(args).releaseState?.(context);
+
+      sinon.assert.calledOnceWithExactly(context.releaseScreencasts);
+    });
   });
 
   it('records two pages concurrently (e2e)', async () => {

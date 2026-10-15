@@ -457,7 +457,7 @@ describe('McpContext', () => {
     });
   });
 
-  it('does not operate on a closed and already-disposed selected page in updateOptions or releaseState', async () => {
+  it('does not operate on a closed and already-disposed selected page in updateOptions or release methods', async () => {
     const browser = createMockPuppeteerBrowser();
     const pptrPage = createMockPuppeteerPage();
     const target = createMockPuppeteerTarget({page: pptrPage});
@@ -476,12 +476,8 @@ describe('McpContext', () => {
     const disposeSpy = sinon.spy(page, 'dispose');
 
     context.updateOptions({performanceCrux: true, sourceMaps: false});
-    await context.releaseState({
-      screencast: true,
-      heapSnapshots: false,
-      performanceTrace: false,
-      devtoolsComments: true,
-    });
+    await context.releaseScreencasts();
+    context.releaseDevToolsComments();
     context.dispose();
 
     sinon.assert.notCalled(setSourceMapsSpy);
@@ -1302,11 +1298,7 @@ describe('McpContext', () => {
       recorder.stop.resolves();
       page.setScreenRecorder({recorder, filePath: '/tmp/video.mp4'});
 
-      await context.releaseState({
-        screencast: true,
-        heapSnapshots: false,
-        performanceTrace: false,
-      });
+      await context.releaseScreencasts();
 
       sinon.assert.calledOnceWithExactly(recorder.stop);
       assert.strictEqual(page.getScreenRecorder(), null);
@@ -1324,33 +1316,10 @@ describe('McpContext', () => {
       recorder.stop.rejects(new Error('ffmpeg error'));
       page.setScreenRecorder({recorder, filePath: '/tmp/video.mp4'});
 
-      await context.releaseState({
-        screencast: true,
-        heapSnapshots: false,
-        performanceTrace: false,
-      });
+      await context.releaseScreencasts();
 
       sinon.assert.calledOnceWithExactly(recorder.stop);
       assert.strictEqual(page.getScreenRecorder(), null);
-      sinon.assert.notCalled(onNotification);
-    });
-
-    it('keeps the screencast recording when not released', async () => {
-      const onNotification = sinon.stub();
-      const context = await createMockContext({onNotification});
-      const page = context.getSelectedMcpPage();
-      const recorder = sinon.createStubInstance(ScreenRecorder);
-      const data = {recorder, filePath: '/tmp/video.mp4'};
-      page.setScreenRecorder(data);
-
-      await context.releaseState({
-        screencast: false,
-        heapSnapshots: true,
-        performanceTrace: true,
-      });
-
-      sinon.assert.notCalled(recorder.stop);
-      assert.strictEqual(page.getScreenRecorder(), data);
       sinon.assert.notCalled(onNotification);
     });
 
@@ -1365,17 +1334,22 @@ describe('McpContext', () => {
         path.join(process.cwd(), 'tests/fixtures/example.heapsnapshot'),
       );
 
-      await context.releaseState({
-        screencast: false,
-        heapSnapshots: true,
-        performanceTrace: false,
-      });
+      context.releaseHeapSnapshots();
 
       assert.strictEqual(heapSnapshotManager.hasSnapshots(), false);
       sinon.assert.calledOnceWithExactly(
         onNotification,
         'Loaded heap snapshots were closed because memory tools were disabled.',
       );
+    });
+
+    it('does not notify when releasing heap snapshots with none loaded', async () => {
+      const onNotification = sinon.stub();
+      const context = await createMockContext({onNotification});
+
+      context.releaseHeapSnapshots();
+
+      sinon.assert.notCalled(onNotification);
     });
 
     it('stops the running performance trace, clears recorded traces, and notifies', async () => {
@@ -1390,11 +1364,7 @@ describe('McpContext', () => {
       assert.ok(traceResultIsSuccess(traceResult));
       context.storeTraceRecording(traceResult);
 
-      await context.releaseState({
-        screencast: false,
-        heapSnapshots: false,
-        performanceTrace: true,
-      });
+      await context.releasePerformanceTrace();
 
       sinon.assert.calledOnceWithExactly(pptrPage.tracing.stop);
       assert.strictEqual(context.isRunningPerformanceTrace(), false);
@@ -1413,12 +1383,7 @@ describe('McpContext', () => {
         'disposeCommentBridge',
       );
 
-      await context.releaseState({
-        screencast: false,
-        heapSnapshots: false,
-        performanceTrace: false,
-        devtoolsComments: true,
-      });
+      context.releaseDevToolsComments();
 
       sinon.assert.calledOnceWithExactly(disposeCommentBridgeSpy);
     });

@@ -421,6 +421,14 @@ describe('memory', () => {
         },
       );
     });
+
+    it('releases heap snapshots on context when disabled', async () => {
+      const {context, args} = createHandlerMocks();
+
+      await closeHeapSnapshot(args).releaseState?.(context);
+
+      sinon.assert.calledOnceWithExactly(context.releaseHeapSnapshots);
+    });
   });
 
   describe('get_heapsnapshot_retaining_paths', () => {

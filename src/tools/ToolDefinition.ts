@@ -80,9 +80,21 @@ export type MergeSchema<Schema extends zod.ZodRawShape> = {
     : zod.ZodOptional<ExtractSchemaField<Schema, K>>;
 };
 
-export interface BaseToolDefinition<
-  Schema extends zod.ZodRawShape = zod.ZodRawShape,
-> {
+type ToolStateDefinition =
+  | {
+      reloadable: true;
+      /**
+       * Releases state owned by this tool when the tool is disabled by a config
+       * reload.
+       */
+      releaseState(context: Context): Promise<void> | void;
+    }
+  | {
+      reloadable?: false;
+      releaseState?: never;
+    };
+
+interface BaseToolProperties<Schema extends zod.ZodRawShape = zod.ZodRawShape> {
   name: string;
   description: string;
   annotations: {
@@ -106,16 +118,19 @@ export interface BaseToolDefinition<
   >;
 }
 
-export interface ToolDefinition<
+export type BaseToolDefinition<
   Schema extends zod.ZodRawShape = zod.ZodRawShape,
-> extends BaseToolDefinition<Schema> {
-  schema: Schema;
-  handler(
-    request: Request<Schema>,
-    response: Response,
-    context: Context,
-  ): Promise<void>;
-}
+> = BaseToolProperties<Schema> & ToolStateDefinition;
+
+export type ToolDefinition<Schema extends zod.ZodRawShape = zod.ZodRawShape> =
+  BaseToolDefinition<Schema> & {
+    schema: Schema;
+    handler(
+      request: Request<Schema>,
+      response: Response,
+      context: Context,
+    ): Promise<void>;
+  };
 
 export type SchemaType<T extends zod.ZodRawShape> = zod.output<
   zod.ZodObject<MergeSchema<T>>
@@ -317,6 +332,10 @@ export type Context = Readonly<{
   isCruxEnabled(): boolean;
   recordedTraces(): TraceResult[];
   storeTraceRecording(result: TraceResult): void;
+  releaseScreencasts(): Promise<void>;
+  releaseHeapSnapshots(): void;
+  releasePerformanceTrace(): Promise<void>;
+  releaseDevToolsComments(): void;
   getPageById(pageId: number): ContextPage;
   newPage(
     background?: boolean,
@@ -485,26 +504,26 @@ export function defineTool<Schema extends zod.ZodRawShape>(
   return definition;
 }
 
-interface PageToolDefinition<
-  Schema extends zod.ZodRawShape = zod.ZodRawShape,
-> extends BaseToolDefinition<Schema> {
-  handler(
-    request: Request<Schema> & {page: ContextPage},
-    response: Response,
-    context: Context,
-  ): Promise<void>;
-}
-
-export type DefinedPageTool<Schema extends zod.ZodRawShape = zod.ZodRawShape> =
-  Omit<PageToolDefinition<Schema>, 'schema'> & {
-    schema: Schema & Partial<typeof pageIdSchema>;
-    pageScoped: true;
+type PageToolDefinition<Schema extends zod.ZodRawShape = zod.ZodRawShape> =
+  BaseToolDefinition<Schema> & {
     handler(
       request: Request<Schema> & {page: ContextPage},
       response: Response,
       context: Context,
     ): Promise<void>;
   };
+
+export type DefinedPageTool<Schema extends zod.ZodRawShape = zod.ZodRawShape> =
+  Omit<BaseToolProperties<Schema>, 'schema'> &
+    ToolStateDefinition & {
+      schema: Schema & Partial<typeof pageIdSchema>;
+      pageScoped: true;
+      handler(
+        request: Request<Schema> & {page: ContextPage},
+        response: Response,
+        context: Context,
+      ): Promise<void>;
+    };
 
 export function definePageTool<Schema extends zod.ZodRawShape>(
   definition: (args: ParsedArguments) => PageToolDefinition<Schema>,

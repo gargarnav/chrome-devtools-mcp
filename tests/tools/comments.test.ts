@@ -134,6 +134,14 @@ describe('comments tools', () => {
       t.assert.snapshot(lines.join('\n'));
       sinon.assert.notCalled(response.setDevToolsComments);
     });
+
+    it('releases DevTools comments on context when disabled', async () => {
+      const {context, args} = createHandlerMocks();
+
+      await getDevtoolsComments(args).releaseState?.(context);
+
+      sinon.assert.calledOnceWithExactly(context.releaseDevToolsComments);
+    });
   });
 
   describe('resolve_devtools_comment', () => {

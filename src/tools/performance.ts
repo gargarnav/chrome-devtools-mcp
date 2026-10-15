@@ -156,6 +156,10 @@ export const stopTrace = definePageTool(() => ({
   verifyFilesSchema: {
     filePath: true,
   },
+  reloadable: true,
+  releaseState: async context => {
+    await context.releasePerformanceTrace();
+  },
   handler: async (request, response, context) => {
     if (!context.isRunningPerformanceTrace()) {
       response.appendResponseLine(

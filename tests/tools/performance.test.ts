@@ -411,6 +411,15 @@ describe('performance', () => {
       );
     });
 
+    it('releases performance trace on context when disabled', async () => {
+      const {context, args} = createHandlerMocks();
+      context.releasePerformanceTrace.resolves();
+
+      await stopTrace(args).releaseState?.(context);
+
+      sinon.assert.calledOnceWithExactly(context.releasePerformanceTrace);
+    });
+
     it('will stop the trace and return trace info when a trace is running', async () => {
       const rawData = loadTraceAsBuffer('basic-trace.json.gz');
       await withMcpContext(async (response, context, args) => {

@@ -52,6 +52,10 @@ export const getDevtoolsComments = definePageTool(() => ({
   schema: {},
   blockedByDialog: false,
   verifyFilesSchema: {},
+  reloadable: true,
+  releaseState: context => {
+    context.releaseDevToolsComments();
+  },
   handler: async (request, response) => {
     const page = request.page;
     const devtoolsPage = await page.getDevToolsPage();
