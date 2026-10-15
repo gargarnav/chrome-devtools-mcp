@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.11.1](https://github.com/ChromeDevTools/chrome-devtools-mcp/compare/chrome-devtools-mcp-v1.11.0...chrome-devtools-mcp-v1.11.1) (2026-10-15)
+
+
+### 🛠️ Fixes
+
+* stop active screencast on McpPage.dispose() ([#3160](https://github.com/ChromeDevTools/chrome-devtools-mcp/issues/3160)) ([558af81](https://github.com/ChromeDevTools/chrome-devtools-mcp/commit/558af8196fc2ec1ddfcef4f1f726a9502b84b0fc))
+
+
+### ⚡ Performance
+
+* load the Lighthouse bundle on first use ([#3169](https://github.com/ChromeDevTools/chrome-devtools-mcp/issues/3169)) ([798f03a](https://github.com/ChromeDevTools/chrome-devtools-mcp/commit/798f03ae885657788d483bb1997b435f0546878b))
+
+
+### 🏗️ Refactor
+
+* register all tools upfront across modes ([#3163](https://github.com/ChromeDevTools/chrome-devtools-mcp/issues/3163)) ([58f8d1f](https://github.com/ChromeDevTools/chrome-devtools-mcp/commit/58f8d1f5c8b0cfaafbf471bbabb19b6718cdb45d))
+
 ## [1.11.0](https://github.com/ChromeDevTools/chrome-devtools-mcp/compare/chrome-devtools-mcp-v1.10.1...chrome-devtools-mcp-v1.11.0) (2026-10-15)
 
 
